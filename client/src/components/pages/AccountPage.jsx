@@ -42,6 +42,9 @@ export default function AccountPage({ user, onLogout }) {
   const [mfaSetupOpen, setMfaSetupOpen] = useState(false)
   const [mfaUnenrollTarget, setMfaUnenrollTarget] = useState(null)
   const [mfaMsg, setMfaMsg] = useState(null)
+  const [mfaDisableCode, setMfaDisableCode] = useState('')
+  const [mfaDisabling, setMfaDisabling] = useState(false)
+  const [mfaDisableError, setMfaDisableError] = useState('')
 
   const refreshMfaFactors = () => {
     setMfaLoading(true)
@@ -58,10 +61,36 @@ export default function AccountPage({ user, onLogout }) {
     setMfaMsg('Two-factor authentication enabled.')
   }
 
-  const handleMfaUnenroll = async () => {
-    const factorId = mfaUnenrollTarget
+  const closeMfaDisableDialog = () => {
     setMfaUnenrollTarget(null)
-    await supabase.auth.mfa.unenroll({ factorId })
+    setMfaDisableCode('')
+    setMfaDisableError('')
+  }
+
+  const handleMfaUnenroll = async (e) => {
+    e.preventDefault()
+    const factorId = mfaUnenrollTarget
+    setMfaDisabling(true)
+    setMfaDisableError('')
+    // Unenrolling a *verified* factor requires an aal2 (MFA-verified) session,
+    // but nothing in this app's login flow ever challenges for a code after
+    // the initial enrollment — every session sits at aal1 regardless. Step up
+    // here with a fresh code before unenrolling, or Supabase silently rejects
+    // the unenroll and the UI would otherwise show "disabled" while the
+    // factor is still active.
+    const { error: verifyErr } = await supabase.auth.mfa.challengeAndVerify({ factorId, code: mfaDisableCode })
+    if (verifyErr) {
+      setMfaDisabling(false)
+      setMfaDisableError(verifyErr.message)
+      return
+    }
+    const { error: unenrollErr } = await supabase.auth.mfa.unenroll({ factorId })
+    setMfaDisabling(false)
+    if (unenrollErr) {
+      setMfaDisableError(unenrollErr.message)
+      return
+    }
+    closeMfaDisableDialog()
     refreshMfaFactors()
     setMfaMsg('Two-factor authentication disabled.')
   }
@@ -358,38 +387,59 @@ export default function AccountPage({ user, onLogout }) {
         onEnrolled={handleMfaEnrolled}
       />
 
-      <Dialog open={!!mfaUnenrollTarget} onOpenChange={v => { if (!v) setMfaUnenrollTarget(null) }}>
+      <Dialog open={!!mfaUnenrollTarget} onOpenChange={v => { if (!v) closeMfaDisableDialog() }}>
         <DialogContent style={{ maxWidth: 380 }}>
           <DialogHeader>
             <DialogTitle>Disable two-factor authentication?</DialogTitle>
           </DialogHeader>
-          <p style={{ margin: 0, fontSize: 14, color: C.muted }}>
-            You'll no longer be asked for a verification code for sensitive actions on this account.
-          </p>
-          <DialogFooter>
-            <button
-              type="button"
-              onClick={() => setMfaUnenrollTarget(null)}
+          <form onSubmit={handleMfaUnenroll} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <p style={{ margin: 0, fontSize: 14, color: C.muted }}>
+              Enter a current code from your authenticator app to confirm. You'll no longer be asked
+              for a verification code for sensitive actions on this account.
+            </p>
+            <input
+              type="text"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              maxLength={6}
+              value={mfaDisableCode}
+              onChange={e => setMfaDisableCode(e.target.value.replace(/\D/g, ''))}
+              placeholder="6-digit code"
+              required
+              autoFocus
               style={{
-                padding: '8px 16px', borderRadius: 8, border: `1px solid ${C.border}`,
-                background: 'transparent', color: C.text, fontSize: 13, fontWeight: 600,
-                cursor: 'pointer', fontFamily: 'inherit',
+                width: '100%', padding: '9px 13px', borderRadius: 9, border: `1px solid ${C.border}`,
+                background: C.bg, color: C.text, fontSize: 16, letterSpacing: '0.3em', textAlign: 'center',
+                outline: 'none', boxSizing: 'border-box', fontFamily: 'inherit',
               }}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={handleMfaUnenroll}
-              style={{
-                padding: '8px 16px', borderRadius: 8, border: 'none',
-                background: '#e57373', color: '#fff', fontSize: 13, fontWeight: 700,
-                cursor: 'pointer', fontFamily: 'inherit',
-              }}
-            >
-              Disable
-            </button>
-          </DialogFooter>
+            />
+            {mfaDisableError && <p style={{ margin: 0, fontSize: 12, color: '#e57373' }}>{mfaDisableError}</p>}
+            <DialogFooter>
+              <button
+                type="button"
+                onClick={closeMfaDisableDialog}
+                style={{
+                  padding: '8px 16px', borderRadius: 8, border: `1px solid ${C.border}`,
+                  background: 'transparent', color: C.text, fontSize: 13, fontWeight: 600,
+                  cursor: 'pointer', fontFamily: 'inherit',
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={mfaDisabling || mfaDisableCode.length !== 6}
+                style={{
+                  padding: '8px 16px', borderRadius: 8, border: 'none',
+                  background: '#e57373', color: '#fff', fontSize: 13, fontWeight: 700,
+                  cursor: (mfaDisabling || mfaDisableCode.length !== 6) ? 'not-allowed' : 'pointer',
+                  opacity: (mfaDisabling || mfaDisableCode.length !== 6) ? 0.6 : 1, fontFamily: 'inherit',
+                }}
+              >
+                {mfaDisabling ? 'Disabling…' : 'Disable'}
+              </button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
 

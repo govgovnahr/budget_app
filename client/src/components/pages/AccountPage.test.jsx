@@ -11,12 +11,14 @@ vi.mock('../dialogs/ClearAllDialog.jsx', () => ({ default: () => null }))
 
 const mockListFactors = vi.fn()
 const mockUnenroll = vi.fn()
+const mockChallengeAndVerify = vi.fn()
 vi.mock('../../supabase.js', () => ({
   supabase: {
     auth: {
       mfa: {
         listFactors: (...args) => mockListFactors(...args),
         unenroll: (...args) => mockUnenroll(...args),
+        challengeAndVerify: (...args) => mockChallengeAndVerify(...args),
       },
     },
   },
@@ -33,6 +35,8 @@ beforeEach(() => {
   mockGet.mockResolvedValue({ data: { ai_enabled: true, cycle_start_day: 1 } })
   mockUnenroll.mockReset()
   mockUnenroll.mockResolvedValue({ data: {}, error: null })
+  mockChallengeAndVerify.mockReset()
+  mockChallengeAndVerify.mockResolvedValue({ data: {}, error: null })
 })
 
 function renderAccountPage() {
@@ -61,11 +65,17 @@ describe('AccountPage two-factor authentication section', () => {
     expect(screen.getByText(/enabled — your account requires/i)).toBeInTheDocument()
   })
 
-  it('unenrolls the factor after confirming Disable', async () => {
+  it('re-verifies with a fresh code before unenrolling the factor', async () => {
     mockListFactors.mockResolvedValue({ data: { totp: [{ id: 'factor-1', factor_type: 'totp', status: 'verified' }] } })
     renderAccountPage()
 
     fireEvent.click(await screen.findByRole('button', { name: /^disable$/i }))
+
+    // Unenrolling a verified factor requires an aal2 session, which this app
+    // never establishes during normal login (no step-up challenge exists) —
+    // so the confirm dialog collects a fresh code and re-verifies first.
+    const codeInput = await screen.findByPlaceholderText(/6-digit code/i)
+    fireEvent.change(codeInput, { target: { value: '123456' } })
 
     // Opening the confirm dialog leaves the section's own "Disable" toggle button
     // in the DOM (Radix portals the dialog rather than replacing page content),
@@ -73,6 +83,21 @@ describe('AccountPage two-factor authentication section', () => {
     const disableButtons = await screen.findAllByRole('button', { name: /^disable$/i })
     fireEvent.click(disableButtons[disableButtons.length - 1])
 
+    await waitFor(() => expect(mockChallengeAndVerify).toHaveBeenCalledWith({ factorId: 'factor-1', code: '123456' }))
     await waitFor(() => expect(mockUnenroll).toHaveBeenCalledWith({ factorId: 'factor-1' }))
+  })
+
+  it('shows the error and does not unenroll when re-verification fails', async () => {
+    mockListFactors.mockResolvedValue({ data: { totp: [{ id: 'factor-1', factor_type: 'totp', status: 'verified' }] } })
+    mockChallengeAndVerify.mockResolvedValue({ data: null, error: { message: 'Invalid TOTP code entered' } })
+    renderAccountPage()
+
+    fireEvent.click(await screen.findByRole('button', { name: /^disable$/i }))
+    fireEvent.change(await screen.findByPlaceholderText(/6-digit code/i), { target: { value: '000000' } })
+    const disableButtons = await screen.findAllByRole('button', { name: /^disable$/i })
+    fireEvent.click(disableButtons[disableButtons.length - 1])
+
+    expect(await screen.findByText(/invalid totp code entered/i)).toBeInTheDocument()
+    expect(mockUnenroll).not.toHaveBeenCalled()
   })
 })
