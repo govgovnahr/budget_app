@@ -234,18 +234,32 @@ def _bind_rls_identity(conn):
 
 
 def get_connection():
-    raw = _get_pool().getconn()
-    conn = _Connection(raw)
-    try:
-        _bind_rls_identity(conn)
-    except Exception:
-        # Binding failed (e.g. the connecting role isn't a member of
-        # `authenticated`) before the caller ever received a usable
-        # connection — release it back to the pool's accounting explicitly,
-        # since the caller has no reference to call close() on.
-        _release(raw)
-        raise
-    return conn
+    for attempt in range(2):
+        raw = _get_pool().getconn()
+        conn = _Connection(raw)
+        try:
+            _bind_rls_identity(conn)
+            return conn
+        except psycopg2.DatabaseError:
+            # A connection that went stale server-side while idle in the pool
+            # (e.g. Supabase's transaction pooler dropping it) fails on exactly
+            # this first bootstrap query after checkout — same failure shape
+            # _ReconnectingCursor already retries mid-request. It's dead, not
+            # just mid-transaction, so discard it outright rather than
+            # returning it to the pool via _release(). Try once more with a
+            # fresh connection before giving up.
+            try:
+                _get_pool().putconn(raw, close=True)
+            except Exception:
+                pass
+            if attempt == 1:
+                raise
+        except Exception:
+            # Non-connection failure (e.g. the connecting role isn't a member
+            # of `authenticated`) — retrying won't help; release cleanly and
+            # propagate immediately.
+            _release(raw)
+            raise
 
 
 def close_pool():
