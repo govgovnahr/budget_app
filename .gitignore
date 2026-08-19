@@ -24,3 +24,6 @@ server/*.spec
 
 # OS
 .DS_Store
+
+# Claude Code local settings (machine-specific permissions/config)
+.claude/settings.local.json
